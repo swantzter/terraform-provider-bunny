@@ -17,6 +17,15 @@ import (
 
 const (
 	keyDnsZoneDomain = "domain"
+	keyDnsZoneCustomNameservers = "custom_nameservers"
+	keyDnsZoneCustomNameserversEnabled = "enabled"
+	keyDnsZoneCustomNameserversSoaEmail = "soa_email"
+	keyDnsZoneCustomNameserversNameserver1 = "nameserver_1"
+	keyDnsZoneCustomNameserversNameserver2 = "nameserver_2"
+	keyDnsZoneLogging = "logging"
+	keyDnsZoneLoggingEnabled = "enabled"
+	keyDnsZoneLoggingIpAnonymization = "ip_anonymization"
+	keyDnsZoneLoggingIpAnonymizationEnabled = "ip_anonymization_enabled"
 	keyLastUpdated = "last_updated"
 )
 
@@ -27,7 +36,7 @@ func resourceDnsZone() *schema.Resource {
 		ReadContext:   resourceDnsZoneRead,
 		DeleteContext: resourceDnsZoneDelete,
 		Importer: &schema.ResourceImporter{
-			StateContext: resourceDnsZoneImport,
+			StateContext: schema.ImportStatePassthroughContext,
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -37,12 +46,59 @@ func resourceDnsZone() *schema.Resource {
 				Required: true,
 				ForceNew: true
 			},
-
-			// TODO: custom nameserver, specify as blocks? (ns1, ns2, strings)
-			// TODO: SoaEmail (string)
-			// TODO: LoggingEnabled (bool)
-			// TODO: LogAnonymizationType (0, 1)
-			// TODO: LoggingIPAnonymizationEnabled (bool)
+			keyDnsZoneCustomNameservers: {
+				Type:     schema.TypeSet,
+				Optional: true,
+				MaxItems: 1,
+				DiffSuppressFunc: diffSupressMissingOptionalBlock,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						keyDnsZoneCustomNameserversEnabled: {
+							Type: schema.TypeBool,
+							Computed: true,
+						},
+						keyDnsZoneCustomNameserversSoaEmail: {
+							Type: schema.TypeString,
+							Required: true
+						},
+						keyDnsZoneCustomNameserversNameserver1: {
+							Type:        schema.TypeString,
+							Required:    true,
+						},
+						keyDnsZoneCustomNameserversNameserver2: {
+							Type:        schema.TypeString,
+							Required:    true,
+						},
+					},
+				},
+			},
+			keyDnsZoneLogging: {
+				Type:     schema.TypeSet,
+				Optional: true,
+				MaxItems: 1,
+				DiffSuppressFunc: diffSupressMissingOptionalBlock,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						keyDnsZoneLoggingEnabled: {
+							Type: schema.TypeBool,
+							Computed: true,
+						},
+						keyDnsZoneLoggingIpAnonymizationEnabled: {
+							Type: schema.TypeBool,
+							Computed: true,
+						},
+						keyDnsZoneLoggingIpAnonymization: {
+							Type: schema.TypeString,
+							Optional: true,
+							Description: "The type of anonymization.\nValid values: " +
+								strings.Join(dnsZoneLoggingAnonymizationTypeKeys, ", "),
+							ValidateDiagFunc: validation.ToDiagFunc(
+								validation.StringInSlice(dnsZoneLoggingAnonymizationTypeKeys, false),
+							),
+						},
+					},
+				},
+			},
 
 			keyLastUpdated: {
 				Type:     schema.TypeString,
@@ -94,7 +150,7 @@ func resourceDnsZoneCreate(ctx context.Context, d *schema.ResourceData, meta int
 func resourceDnsZoneUpdate(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
 	clt := meta.(*bunny.Client)
 
-	dnsZone, err := dnsZoneFromResource(d)
+	dnsZone, err := dnsZoneUpdateFromResource(d)
 	if err != nil {
 		return diagsErrFromErr("converting resource to API type failed", err)
 	}
@@ -137,9 +193,101 @@ func resourceDnsZoneRead(ctx context.Context, d *schema.ResourceData, meta inter
 		return diagsErrFromErr("could not retrieve DNS zone", err)
 	}
 
-	if err := dnsZoneToResource(pz, d); err != nil {
+	if err := dnsZoneToResource(dnsZone, d); err != nil {
 		return diagsErrFromErr("converting api type to resource data after successful read failed", err)
 	}
 
 	return nil
+}
+
+func resourceDnsZoneDelete(ctx context.Context, d *schema.ResourceData, meta interface{}) diag.Diagnostics {
+	clt := meta.(*bunny.Client)
+
+	id, err := getIDAsInt64(d)
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	err = clt.DNSZone.Delete(ctx, id)
+	if err != nil {
+		return diagsErrFromErr("could not delete DNS zone", err)
+	}
+
+	d.SetId("")
+
+	return nil
+}
+
+func dnsZoneToResource(dnsZone *bunny.DNSZone, d *schema.*ResourceData) error {
+	if dnsZone.ID != nil {
+		d.SetId(strconv.FormatInt(*dnsZone.ID, 10))
+	}
+
+	if err := d.Set(keyDnsZoneDomain, dnsZone.Domain); err != nil {
+		return err
+	}
+
+	customNameserversSettings := map[string]interface{}{}
+	customNameserversSettings[keyDnsZoneCustomNameserversEnabled] = dnsZone.CustomNameserversEnabled
+	customNameserversSettings[keyDnsZoneCustomNameserversNameserver1] = dnsZone.Nameserver1
+	customNameserversSettings[keyDnsZoneCustomNameserversNameserver2] = dnsZone.Nameserver2
+	customNameserversSettings[keyDnsZoneCustomNameserversSoaEmail] = dnsZone.SoaEmail
+	if err := d.Set(keyDnsZoneCustomNameservers, []map[string]interface{}{customNameserversSettings}); err != nil {
+		return err
+	}
+
+	loggingSettings := map[string]interface{}{}
+	anonymizationType, err := intStrMapGet(dnsZoneLoggingAnonymizationTypesInt, dnsZone.LogAnonymizationType)
+		if err != nil {
+			return fmt.Errorf("%s: %w", anonymizationType, err)
+		}
+	loggingSettings[keyDnsZoneLoggingEnabled] = dnsZone.LoggingEnabled
+	loggingSettings[keyDnsZoneLoggingIpAnonymizationEnabled] = dnsZone.LoggingIPAnonymizationEnabled
+	loggingSettings[keyDnsZoneLoggingIpAnonymization] = anonymizationType
+	if err := d.Set(keyDnsZoneLogging, []map[string]interface{}{loggingSettings}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func dnsZoneUpdateFromResource(d *schema.ResourceData) (*bunny.DNSZone, error) {
+	var res bunny.DNSZoneUpdateOptions
+
+	customNameservers := structureFromResource(d, keyDnsZoneCustomNameservers)
+	if len(customNameservers) == 0 {
+		res.CustomNameserversEnabled = false
+	} else {
+		res.CustomNameserversEnabled = true
+		res.Nameserver1 = customNameservers.getStrPtr(keyDnsZoneCustomNameserversNameserver1)
+		res.Nameserver2 = customNameservers.getStrPtr(keyDnsZoneCustomNameserversNameserver2)
+		res.SoaEmail = customNameservers.getStrPtr(keyDnsZoneCustomNameserversSoaEmail)
+	}
+
+	logging := structureFromResource(d, keyDnsZoneLogging)
+	if len(logging) == 0 {
+	  res.LoggingEnabled = false
+	  res.LoggingIPAnonymizationEnabled = false
+	} else {
+		res.LoggingEnabled = true
+
+		anonymizationType, err := edgeRuleTriggerTypeToInt(logging[keyDnsZoneLoggingIpAnonymization].(string))
+		if err != nil {
+			res.LoggingIPAnonymizationEnabled = false
+		} else {
+			res.LoggingIPAnonymizationEnabled = true
+			res.LogAnonymizationType = anonymizationType
+		}
+
+	}
+
+	return &res, nil
+}
+
+func dnsZoneLoggingAnonymizationTypeToInt(anonymizationType string) (int, error) {
+	if k, exists := dnsZoneLoggingAnonymizationTypesStr[anonymizationType]; exists {
+		return k, nil
+	}
+
+	return -1, fmt.Errorf("unsupported IP anonymization type: %q", triggerType)
 }
